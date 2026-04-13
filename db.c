@@ -1,3 +1,5 @@
+#include "pager.h"
+
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,10 +30,6 @@ const uint32_t ID_OFFSET = 0;
 const uint32_t USERNAME_OFFSET = ID_OFFSET + ID_SIZE;
 const uint32_t EMAIL_OFFSET = USERNAME_OFFSET + USERNAME_SIZE;
 const uint32_t ROW_SIZE = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE;
-
-//Table Structure
-const uint32_t PAGE_SIZE = 4096;
-#define TABLE_MAX_PAGES 100
 
 //Comun node header Layout
 
@@ -156,14 +154,6 @@ uint32_t* internal_node_child(void* node,uint32_t child_num){
   }
 }
 
-
-typedef struct{
-  int file_descriptor;
-  uint32_t file_length;
-  uint32_t num_pages;
-  void* pages[TABLE_MAX_PAGES];
-}Pager;
-
 typedef struct {
   Pager* pager;
   uint32_t root_page_num;
@@ -214,60 +204,9 @@ void deserialize_row(void* source, Row* destination) {
   memcpy(&(destination->email), source + EMAIL_OFFSET, EMAIL_SIZE);
 }
 
-void pager_flush(Pager* pager, uint32_t page_num){
-  if(pager->pages[page_num] == NULL){
-    printf("tried to flush null page\n");
-    exit(EXIT_FAILURE);
-  }
-  off_t offset = lseek(pager->file_descriptor,page_num * PAGE_SIZE,SEEK_SET);
-
-  if(offset == -1){
-    printf("Error seeking: %d\n",errno);
-    exit(EXIT_FAILURE);
-  }
-
-  ssize_t bytes_written =
-      write(pager->file_descriptor,pager->pages[page_num],PAGE_SIZE);
-
-  if(bytes_written == -1){
-    printf("Error writing: %d\n",errno);
-    exit(EXIT_FAILURE);
-  } 
-}
 
 uint32_t* node_parent(void* node){return node + PARENT_POINTER_OFFSET;}
 
-void* get_page(Pager* pager,uint32_t page_num){
-  if(page_num > TABLE_MAX_PAGES){
-    printf("Tried to fetch pahe number out of bounds.d %d > %d\n",page_num,
-           TABLE_MAX_PAGES);
-    exit(EXIT_FAILURE);
-  }
-  if (pager->pages[page_num] == NULL){
-    // cache miss. allocate memory and load from file.
-    void* page = malloc(PAGE_SIZE);
-    uint32_t num_pages = pager->file_length / PAGE_SIZE;
-
-    //might save a partial page at the end of the file
-    if(pager->file_length % PAGE_SIZE){
-      num_pages += 1;
-    }
-    if (page_num < num_pages ){
-      lseek(pager->file_descriptor, page_num * PAGE_SIZE, SEEK_SET);
-      ssize_t bytes_read = read(pager->file_descriptor,page,PAGE_SIZE);
-      if(bytes_read == -1){
-        printf("Error reading file: %d\n",errno);
-        exit(EXIT_FAILURE);
-      }
-    }
-    pager->pages[page_num] = page;
-
-    if(page_num >= pager->num_pages){
-      pager->num_pages = page_num + 1;
-    }
-  }
-  return pager->pages[page_num];
-}
 uint32_t* internal_node_key(void* node,uint32_t key_num){
   return (void*)internal_node_cell(node,key_num) + INTERNAL_NODE_CHILD_SIZE;
 }
@@ -304,9 +243,7 @@ Cursor* leaf_node_find(Table* table,uint32_t page_num,uint32_t key){
 /* Until we start recycling free pages, new pages will always
  * go onto teh end of the base file 
  * */
-uint32_t get_unused_page_num(Pager* pager){
-  return pager->num_pages;
-}
+
 void create_new_root(Table* table,uint32_t right_child_page_num){
 
   /* 
@@ -900,36 +837,6 @@ ExecuteResult execute_statement(Statement* statement,Table* table){
     case(STATEMENT_SELECT):
       return execute_select(statement,table);
   }
-}
-Pager* pager_open(const char* filename){
-  int fd = open(filename,
-                O_RDWR |     // READ/WRITE mode
-                    O_CREAT, // CREATE file if it doesnt exist
-                S_IWUSR |    // USER Write permission
-                S_IRUSR      // USER read permission
-                );
-
-  if (fd == -1){
-    printf("Unable to open file\n");
-    exit(EXIT_FAILURE);
-  }
-
-  off_t file_length = lseek(fd,0,SEEK_END);
-
-  Pager* pager = malloc(sizeof(Pager));
-  pager->file_descriptor = fd;
-  pager->file_length = file_length;
-  pager->num_pages = (file_length / PAGE_SIZE);
-  
-  if(file_length % PAGE_SIZE != 0){
-    printf("Db file is not a whole number of pages. corrupt file.\n ");
-    exit(EXIT_FAILURE);
-  }
-
-  for (uint32_t i = 0; i < TABLE_MAX_PAGES; i++){
-    pager->pages[i] = NULL;
-  }
-  return pager;
 }
 Table* db_open(const char* filename){
   Pager* pager = pager_open(filename); 
