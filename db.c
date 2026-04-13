@@ -1,4 +1,6 @@
 #include "pager.h"
+#include "table.h"
+#include "btree.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -9,83 +11,9 @@
 #include <errno.h>
 #include <fcntl.h>
 
-#define COLUMN_USERNAME_SIZE 32
-#define COLUMN_EMAIL_SIZE 255
+
 #define INVALID_PAGE_NUM UINT32_MAX
 
-
-typedef struct{
-  uint32_t id;
-  char username[COLUMN_USERNAME_SIZE + 1];
-  char email[COLUMN_EMAIL_SIZE + 1];
-} Row;
-typedef enum { NODE_INTERNAL, NODE_LEAF } NodeType;
-
-// Row Structure
-#define size_of_attribute(Struct,Attribute)sizeof(((Struct*)0)->Attribute)
-const uint32_t ID_SIZE = size_of_attribute(Row,id);
-const uint32_t USERNAME_SIZE = size_of_attribute(Row,username);
-const uint32_t EMAIL_SIZE = size_of_attribute(Row,email);
-const uint32_t ID_OFFSET = 0;
-const uint32_t USERNAME_OFFSET = ID_OFFSET + ID_SIZE;
-const uint32_t EMAIL_OFFSET = USERNAME_OFFSET + USERNAME_SIZE;
-const uint32_t ROW_SIZE = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE;
-
-//Comun node header Layout
-
-const uint32_t NODE_TYPE_SIZE = sizeof(uint8_t);
-const uint32_t NODE_TYPE_OFFSET = 0;
-const uint32_t IS_ROOT_SIZE = sizeof(uint8_t);
-const uint32_t IS_ROOT_OFFSET = NODE_TYPE_SIZE;
-const uint32_t PARENT_POINTER_SIZE = sizeof(uint32_t);
-const uint32_t PARENT_POINTER_OFFSET = IS_ROOT_OFFSET + IS_ROOT_SIZE;
-const uint32_t COMMON_NODE_HEADER_SIZE =
-  NODE_TYPE_SIZE + IS_ROOT_SIZE + PARENT_POINTER_SIZE;
-
-//Leaf Header Layout
-const uint32_t LEAF_NODE_NUM_CELLS_SIZE = sizeof(uint32_t);
-const uint32_t LEAF_NODE_NUM_CELLS_OFFSET = COMMON_NODE_HEADER_SIZE;
-const uint32_t LEAF_NODE_NEXT_LEAF_SIZE = sizeof(uint32_t);
-const uint32_t LEAF_NODE_NEXT_LEAF_OFFSET = 
-  LEAF_NODE_NUM_CELLS_OFFSET + LEAF_NODE_NUM_CELLS_SIZE;
-const uint32_t LEAF_NODE_HEADER_SIZE = COMMON_NODE_HEADER_SIZE +
-                                       LEAF_NODE_NUM_CELLS_SIZE +
-                                       LEAF_NODE_NEXT_LEAF_SIZE;
-
-//Leaf Node Body Layout
-const uint32_t LEAF_NODE_KEY_SIZE = sizeof(uint32_t);
-const uint32_t LEAF_NODE_KEY_OFFSET = 0;
-const uint32_t LEAF_NODE_VALUE_SIZE = ROW_SIZE;
-const uint32_t LEAF_NODE_VALUE_OFFSET =
-  LEAF_NODE_KEY_OFFSET + LEAF_NODE_KEY_SIZE;
-const uint32_t LEAF_NODE_CELL_SIZE = LEAF_NODE_KEY_SIZE + LEAF_NODE_VALUE_SIZE;
-const uint32_t LEAF_NODE_SPACE_FOR_CELLS = PAGE_SIZE - LEAF_NODE_HEADER_SIZE;
-const uint32_t LEAF_NODE_MAX_CELLS =
-  LEAF_NODE_SPACE_FOR_CELLS / LEAF_NODE_CELL_SIZE;
-
-const uint32_t LEAF_NODE_RIGHT_SPLIT_COUNT = (LEAF_NODE_MAX_CELLS + 1) / 2;
-const uint32_t LEAF_NODE_LEFT_SPLIT_COUNT = 
-    (LEAF_NODE_MAX_CELLS + 1) - LEAF_NODE_RIGHT_SPLIT_COUNT;
-
-/* 
- * Internal Node Header Layout
- */
-const uint32_t INTERNAL_NODE_NUM_KEYS_SIZE = sizeof(uint32_t);
-const uint32_t INTERNAL_NODE_NUM_KEYS_OFFSET = COMMON_NODE_HEADER_SIZE;
-const uint32_t INTERNAL_NODE_RIGHT_CHILD_SIZE = sizeof(uint32_t);
-const uint32_t INTERNAL_NODE_RIGHT_CHILD_OFFSET = 
-  INTERNAL_NODE_NUM_KEYS_OFFSET + INTERNAL_NODE_NUM_KEYS_SIZE;
-const uint32_t INTERNAL_NODE_HEADER_SIZE = COMMON_NODE_HEADER_SIZE+
-                                           INTERNAL_NODE_NUM_KEYS_SIZE +
-                                          INTERNAL_NODE_RIGHT_CHILD_SIZE;
-/* 
- *Internal Node Body Layout
-  */
-const uint32_t INTERNAL_NODE_KEY_SIZE = sizeof(uint32_t);
-const uint32_t INTERNAL_NODE_CHILD_SIZE = sizeof(uint32_t);
-const uint32_t INTERNAL_NODE_CELL_SIZE =
-  INTERNAL_NODE_CHILD_SIZE + INTERNAL_NODE_KEY_SIZE;
-const uint32_t INTERNAL_NODE_MAX_CELLS = 3;
 
 NodeType get_node_type(void* node){
   uint8_t value = *((uint8_t*)(node + NODE_TYPE_OFFSET));
@@ -153,21 +81,6 @@ uint32_t* internal_node_child(void* node,uint32_t child_num){
     return child;
   }
 }
-
-typedef struct {
-  Pager* pager;
-  uint32_t root_page_num;
-} Table;
-
-
-
-typedef struct{
-  Table* table;
-  uint32_t page_num;
-  uint32_t cell_num;
-  bool end_of_table; // indicates the position one past  the last element
-  // 
-} Cursor;
 
 void internal_node_insert(Table* table,
                           uint32_t parent_page_num,
@@ -533,81 +446,11 @@ void internal_node_insert(Table* table, uint32_t parent_page_num,
   }
 }
 
-
 /*
   * return the position of  the given key.
   *if the key is not present, return the position
   *where it should be inserted
 */
-Cursor* table_find(Table* table,uint32_t key){
-  uint32_t root_page_num = table->root_page_num;
-  void* root_node = get_page(table->pager,root_page_num);
-
-  if(get_node_type(root_node)==NODE_LEAF){
-    return leaf_node_find(table,root_page_num,key);
-  } else{
-    return internal_node_find(table,root_page_num,key); 
-  }
-}
-
-Cursor* table_start(Table* table){
-  Cursor* cursor = table_find(table,0);
-
-  void* node = get_page(table->pager,cursor->page_num);
-  uint32_t num_cells = *leaf_node_num_cells(node);
-  cursor->end_of_table = (num_cells == 0);
-
-  return cursor;
-}
-
-void db_close(Table* table){
-  Pager* pager = table->pager;
-
-  for(uint32_t i = 0;i < pager->num_pages;i++){
-    if(pager->pages[i] == NULL){
-      continue;
-    }
-    pager_flush(pager,i);
-    free(pager->pages[i]);
-    pager->pages[i] = NULL;
-  }
-  int result = close(pager->file_descriptor);
-  if(result == -1){
-    printf("Error closing db file.\n");
-    exit(EXIT_FAILURE);
-  }
-  for(uint32_t i = 0; i < TABLE_MAX_PAGES;i++){
-  void* page = pager->pages[i];
-    if(page){
-    pager->pages[i] = NULL;
-    }
-  }
-  free(pager);
-  free(table);
-}
-
-void* cursor_value(Cursor* cursor){
-  uint32_t page_num = cursor->page_num;
-  void* page = get_page(cursor->table->pager, page_num); 
-  return leaf_node_value(page,cursor->cell_num);
-}
-void cursor_advanced(Cursor* cursor){
-  uint32_t page_num = cursor->page_num;
-  void* node = get_page(cursor->table->pager,page_num);
-
-  cursor->cell_num +=1;
-  if(cursor->cell_num >=(*leaf_node_num_cells(node))){
-    /* Advance to next leaf node  */
-    uint32_t next_page_num = *leaf_node_next_leaf(node);
-    if (next_page_num == 0){
-      /* This was rightmost leaf  */
-      cursor->end_of_table = true;
-    } else{
-      cursor->page_num = next_page_num;
-      cursor->cell_num = 0;
-    }
-  }
-}
 void leaf_node_insert(Cursor* cursor,uint32_t key,Row* value){
   void* node = get_page(cursor->table->pager,cursor->page_num);
 
@@ -838,22 +681,7 @@ ExecuteResult execute_statement(Statement* statement,Table* table){
       return execute_select(statement,table);
   }
 }
-Table* db_open(const char* filename){
-  Pager* pager = pager_open(filename); 
-  
-  Table* table = (Table*)malloc(sizeof(Table));
-  
-  table->pager = pager;
-  table->root_page_num = 0;
 
-  if (pager->num_pages == 0) {
-    // New database file. Initialize page 0 as leaf node.
-    void* root_node = get_page(pager, 0);
-    initialize_leaf_node(root_node);
-    set_node_root(root_node,true);
-  }
-  return table;
-}
 int main(int argc,char* argv[]){
   if(argc < 2){
       printf("Must supply a database filename.\n");  
